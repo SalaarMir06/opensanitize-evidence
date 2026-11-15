@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+dist/
+build/
+*.egg-info/
+evidence/*
+reports/*
+certificates/*
+keys/*
+!.gitkeep
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary files
+*.tmp
+*.part
+
+# Generated Python packaging metadata
+*.egg-info/
