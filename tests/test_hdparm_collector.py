@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from collectors.hdparm.collector import (
+    build_command_record,
     extract_ata_serial,
     save_command_output,
     validate_device,
@@ -10,6 +11,24 @@ from collectors.hdparm.collector import (
 
 
 EXPECTED_SERIAL = "TEST-SERIAL-0001"
+
+
+def make_record(
+    stdout=b"",
+    stderr=b"",
+    exit_code=0,
+    timed_out=False,
+):
+    return {
+        "started_utc": "2026-11-15T08:00:00+00:00",
+        "finished_utc": "2026-11-15T08:00:01+00:00",
+        "duration_seconds": 1.0,
+        "argv": ["/usr/sbin/hdparm", "-I", "/dev/sda"],
+        "exit_code": exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
+        "timed_out": timed_out,
+    }
 
 
 def test_extract_ata_serial():
@@ -39,6 +58,17 @@ def test_validate_device_accepts_expected_usb_disk():
         "type": "disk",
         "serial": EXPECTED_SERIAL,
         "tran": "usb",
+    }
+
+    validate_device(device, EXPECTED_SERIAL)
+
+
+def test_validate_device_accepts_case_insensitive_usb_transport():
+    device = {
+        "path": "/dev/sda",
+        "type": "disk",
+        "serial": EXPECTED_SERIAL,
+        "tran": "USB",
     }
 
     validate_device(device, EXPECTED_SERIAL)
@@ -84,63 +114,121 @@ def test_save_command_output_preserves_raw_bytes_and_hashes(tmp_path):
     stdout = b"\x00ATA evidence\xff\n"
     stderr = b"diagnostic output\n"
 
-    record = {
-        "started_utc": "2026-11-15T08:00:00+00:00",
-        "finished_utc": "2026-11-15T08:00:01+00:00",
-        "duration_seconds": 1.0,
-        "argv": ["/usr/sbin/hdparm", "-I", "/dev/sda"],
-        "exit_code": 0,
-        "stdout": stdout,
-        "stderr": stderr,
-        "timed_out": False,
-    }
-
-    metadata = save_command_output(tmp_path, "identify", record)
+    artifacts = save_command_output(
+        tmp_path,
+        "identify",
+        make_record(stdout=stdout, stderr=stderr),
+    )
 
     assert (tmp_path / "identify.stdout.bin").read_bytes() == stdout
     assert (tmp_path / "identify.stderr.bin").read_bytes() == stderr
-    assert metadata["stdout_sha256"] == hashlib.sha256(stdout).hexdigest()
-    assert metadata["stderr_sha256"] == hashlib.sha256(stderr).hexdigest()
-    assert metadata["stdout_size_bytes"] == len(stdout)
-    assert metadata["stderr_size_bytes"] == len(stderr)
-    assert metadata["capture_complete"] is True
-    assert metadata["exit_code_zero"] is True
+
+    assert len(artifacts) == 2
+
+    stdout_artifact = artifacts[0]
+    stderr_artifact = artifacts[1]
+
+    assert stdout_artifact["artifact_id"] == "identify-stdout"
+    assert stdout_artifact["role"] == "stdout"
+    assert stdout_artifact["path"] == "identify.stdout.bin"
+    assert stdout_artifact["size_bytes"] == len(stdout)
+    assert stdout_artifact["hash"]["algorithm"] == "sha256"
+    assert stdout_artifact["hash"]["value"] == (
+        hashlib.sha256(stdout).hexdigest()
+    )
+
+    assert stderr_artifact["artifact_id"] == "identify-stderr"
+    assert stderr_artifact["role"] == "stderr"
+    assert stderr_artifact["path"] == "identify.stderr.bin"
+    assert stderr_artifact["size_bytes"] == len(stderr)
+    assert stderr_artifact["hash"]["value"] == (
+        hashlib.sha256(stderr).hexdigest()
+    )
 
 
-def test_save_command_output_marks_nonzero_exit(tmp_path):
-    record = {
-        "started_utc": "2026-11-15T08:00:00+00:00",
-        "finished_utc": "2026-11-15T08:00:01+00:00",
-        "duration_seconds": 1.0,
-        "argv": ["/usr/sbin/hdparm", "-I", "/dev/sda"],
-        "exit_code": 1,
-        "stdout": b"partial identify output",
-        "stderr": b"command error",
-        "timed_out": False,
-    }
+def test_save_command_output_preserves_empty_streams(tmp_path):
+    artifacts = save_command_output(
+        tmp_path,
+        "version",
+        make_record(),
+    )
 
-    metadata = save_command_output(tmp_path, "identify", record)
+    assert len(artifacts) == 2
+    assert (tmp_path / "version.stdout.bin").read_bytes() == b""
+    assert (tmp_path / "version.stderr.bin").read_bytes() == b""
 
-    assert metadata["capture_complete"] is True
-    assert metadata["exit_code_zero"] is False
+    assert all(item["size_bytes"] == 0 for item in artifacts)
+    assert all(
+        item["hash"]["value"] == hashlib.sha256(b"").hexdigest()
+        for item in artifacts
+    )
 
 
-def test_save_command_output_marks_timeout_incomplete(tmp_path):
-    record = {
-        "started_utc": "2026-11-15T08:00:00+00:00",
-        "finished_utc": "2026-11-15T08:00:10+00:00",
-        "duration_seconds": 10.0,
-        "argv": ["/usr/sbin/hdparm", "-I", "/dev/sda"],
-        "exit_code": None,
-        "stdout": b"partial identify output",
-        "stderr": b"",
-        "timed_out": True,
-    }
+def test_save_command_output_preserves_nonzero_exit_capture(tmp_path):
+    artifacts = save_command_output(
+        tmp_path,
+        "identify",
+        make_record(
+            stdout=b"partial identify output",
+            stderr=b"command error",
+            exit_code=1,
+        ),
+    )
 
-    metadata = save_command_output(tmp_path, "timeout", record)
-
-    assert metadata["capture_complete"] is False
-    assert metadata["exit_code_zero"] is False
-    assert (tmp_path / "timeout.stdout.bin").read_bytes() == (
+    assert len(artifacts) == 2
+    assert (tmp_path / "identify.stdout.bin").read_bytes() == (
         b"partial identify output"
     )
+    assert (tmp_path / "identify.stderr.bin").read_bytes() == (
+        b"command error"
+    )
+
+
+def test_save_command_output_preserves_timeout_output(tmp_path):
+    artifacts = save_command_output(
+        tmp_path,
+        "identify",
+        make_record(
+            stdout=b"partial identify output",
+            timed_out=True,
+            exit_code=None,
+        ),
+    )
+
+    assert len(artifacts) == 2
+    assert (tmp_path / "identify.stdout.bin").read_bytes() == (
+        b"partial identify output"
+    )
+
+
+def test_build_command_record_marks_completed_nonzero_exit():
+    record = make_record(exit_code=1)
+    artifacts = [
+        {"artifact_id": "identify-stdout"},
+        {"artifact_id": "identify-stderr"},
+    ]
+
+    command = build_command_record(
+        "identify",
+        record,
+        artifacts,
+    )
+
+    assert command["execution_status"] == "COMPLETED"
+    assert command["timed_out"] is False
+    assert command["exit_code"] == 1
+    assert command["extensions"]["exit_code_zero"] is False
+    assert command["artifact_ids"] == [
+        "identify-stdout",
+        "identify-stderr",
+    ]
+
+
+def test_build_command_record_marks_timeout():
+    record = make_record(exit_code=None, timed_out=True)
+    command = build_command_record("identify", record, [])
+
+    assert command["execution_status"] == "TIMED_OUT"
+    assert command["timed_out"] is True
+    assert command["exit_code"] is None
+    assert command["extensions"]["exit_code_zero"] is False
