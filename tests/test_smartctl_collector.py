@@ -3,6 +3,7 @@ import hashlib
 import pytest
 
 from collectors.smartctl.collector import (
+    build_command_record,
     decode_exit_status,
     extract_ata_serial,
     save_command_output,
@@ -121,14 +122,29 @@ def test_save_command_output_preserves_bytes_and_hashes(tmp_path):
         "timed_out": False,
     }
 
-    metadata = save_command_output(tmp_path, "test", record)
+    artifacts = save_command_output(tmp_path, "test", record)
 
     assert (tmp_path / "test.stdout.bin").read_bytes() == stdout
     assert (tmp_path / "test.stderr.bin").read_bytes() == stderr
-    assert metadata["stdout_sha256"] == hashlib.sha256(stdout).hexdigest()
-    assert metadata["stderr_sha256"] == hashlib.sha256(stderr).hexdigest()
-    assert metadata["capture_complete"] is True
-    assert metadata["exit_code_zero"] is True
+    assert len(artifacts) == 2
+
+    stdout_artifact, stderr_artifact = artifacts
+
+    assert stdout_artifact["path"] == "test.stdout.bin"
+    assert stdout_artifact["role"] == "stdout"
+    assert stdout_artifact["size_bytes"] == len(stdout)
+    assert stdout_artifact["hash"]["algorithm"] == "sha256"
+    assert stdout_artifact["hash"]["value"] == hashlib.sha256(stdout).hexdigest()
+
+    assert stderr_artifact["path"] == "test.stderr.bin"
+    assert stderr_artifact["role"] == "stderr"
+    assert stderr_artifact["size_bytes"] == len(stderr)
+    assert stderr_artifact["hash"]["algorithm"] == "sha256"
+    assert stderr_artifact["hash"]["value"] == hashlib.sha256(stderr).hexdigest()
+
+    command = build_command_record("test", record, artifacts)
+    assert command["execution_status"] == "COMPLETED"
+    assert command["extensions"]["exit_code_zero"] is True
 
 
 def test_nonzero_smartctl_status_does_not_mean_capture_failed(tmp_path):
@@ -143,11 +159,15 @@ def test_nonzero_smartctl_status_does_not_mean_capture_failed(tmp_path):
         "timed_out": False,
     }
 
-    metadata = save_command_output(tmp_path, "smart_full", record)
+    artifacts = save_command_output(tmp_path, "smart_full", record)
+    command = build_command_record("smart_full", record, artifacts)
 
-    assert metadata["capture_complete"] is True
-    assert metadata["exit_code_zero"] is False
-    assert metadata["smartctl_status"]["flags"] == ["error_log_records"]
+    assert len(artifacts) == 2
+    assert command["execution_status"] == "COMPLETED"
+    assert command["extensions"]["exit_code_zero"] is False
+    assert command["extensions"]["smartctl_status"]["flags"] == [
+        "error_log_records"
+    ]
 
 
 def test_save_command_output_marks_timeout_incomplete(tmp_path):
@@ -162,8 +182,13 @@ def test_save_command_output_marks_timeout_incomplete(tmp_path):
         "timed_out": True,
     }
 
-    metadata = save_command_output(tmp_path, "timeout", record)
+    artifacts = save_command_output(tmp_path, "timeout", record)
+    command = build_command_record("timeout", record, artifacts)
 
-    assert metadata["capture_complete"] is False
-    assert metadata["exit_code_zero"] is False
+    assert len(artifacts) == 2
+    assert command["execution_status"] == "TIMED_OUT"
+    assert command["timed_out"] is True
+    assert command["exit_code"] is None
+    assert command["extensions"]["exit_code_zero"] is False
+    assert command["extensions"]["smartctl_status"] is None
     assert (tmp_path / "timeout.stdout.bin").read_bytes() == b"partial output"

@@ -95,38 +95,37 @@ def test_collect_success(tmp_path, monkeypatch):
     calls, inventory_calls = configure_mocks(monkeypatch)
     output = tmp_path / "smartctl-evidence"
 
-    result = collector.collect(
-        DEVICE,
-        EXPECTED_SERIAL,
-        output,
-    )
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
 
     assert result == 0
     assert len(calls) == 4
     assert len(inventory_calls) == 2
 
-    manifest = json.loads(
-        (output / "collection.json").read_text()
-    )
+    manifest = json.loads((output / "collection.json").read_text())
 
-    assert manifest["collection_status"] == "SUCCESS"
-    assert manifest["capture_complete"] is True
-    assert manifest["identity_successful"] is True
-    assert manifest["expected_serial"] == EXPECTED_SERIAL
+    assert manifest["schema_version"] == "2.0"
+    assert manifest["collection"]["status"] == "COMPLETE"
+    assert manifest["capture"]["status"] == "COMPLETE"
+    assert manifest["identity"]["status"] == "VERIFIED"
+    assert manifest["target"]["expected_identity"]["serial"] == EXPECTED_SERIAL
     assert manifest["safety"]["read_only_collection"] is True
     assert manifest["safety"]["destructive_commands_executed"] is False
+    assert manifest["assessment"]["status"] == "NOT_ASSESSED"
+    assert collector.validate_manifest(manifest) == []
 
-    assert (output / "version.stdout.bin").read_bytes() == (
-        b"smartctl 7.5\n"
-    )
+    assert len(manifest["commands"]) == 4
+    assert len(manifest["artifacts"]) == 8
 
-    assert (
-        manifest["commands"]["device_full"]["capture_complete"]
-        is True
+    full_report = next(
+        item for item in manifest["commands"]
+        if item["name"] == "device_full"
     )
+    assert full_report["execution_status"] == "COMPLETED"
+    assert len(full_report["artifact_ids"]) == 2
+
+    assert (output / "version.stdout.bin").read_bytes() == b"smartctl 7.5\n"
 
     command_text = [" ".join(argv) for argv in calls]
-
     assert any("--version" in cmd for cmd in command_text)
     assert any("--scan-open" in cmd for cmd in command_text)
     assert any("-i -d sat" in cmd for cmd in command_text)
@@ -143,47 +142,40 @@ def test_nonzero_smartctl_status_preserves_complete_capture(
 ):
     def simulated_command(argv):
         if "-x" in argv:
-            return make_record(
-                smartctl_report(),
-                exit_code=64,
-            )
-
+            return make_record(smartctl_report(), exit_code=64)
         if "--version" in argv:
             return make_record(b"smartctl 7.5\n")
-
         if "--scan-open" in argv:
             return make_record(b"/dev/sda -d sat\n")
-
         if "-i" in argv:
             return make_record(smartctl_report())
-
         pytest.fail(f"Unexpected command: {argv}")
 
     configure_mocks(monkeypatch, simulated_command)
     output = tmp_path / "smartctl-nonzero-status"
 
-    result = collector.collect(
-        DEVICE,
-        EXPECTED_SERIAL,
-        output,
-    )
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
 
     assert result == 0
 
-    manifest = json.loads(
-        (output / "collection.json").read_text()
+    manifest = json.loads((output / "collection.json").read_text())
+    assert manifest["schema_version"] == "2.0"
+    assert collector.validate_manifest(manifest) == []
+
+    full_report = next(
+        item for item in manifest["commands"]
+        if item["name"] == "device_full"
     )
 
-    full_report = manifest["commands"]["device_full"]
-
     assert full_report["exit_code"] == 64
-    assert full_report["capture_complete"] is True
-    assert full_report["exit_code_zero"] is False
-    assert full_report["smartctl_status"]["flags"] == [
+    assert full_report["execution_status"] == "COMPLETED"
+    assert full_report["extensions"]["exit_code_zero"] is False
+    assert full_report["extensions"]["smartctl_status"]["flags"] == [
         "error_log_records"
     ]
-
-    assert manifest["collection_status"] == "SUCCESS"
+    assert manifest["collection"]["status"] == "COMPLETE"
+    assert manifest["capture"]["status"] == "COMPLETE"
+    assert manifest["identity"]["status"] == "VERIFIED"
 
 
 def test_collect_fails_when_smartctl_serial_does_not_match(
@@ -192,92 +184,77 @@ def test_collect_fails_when_smartctl_serial_does_not_match(
     def simulated_command(argv):
         if "--version" in argv:
             return make_record(b"smartctl 7.5\n")
-
         if "--scan-open" in argv:
             return make_record(b"/dev/sda -d sat\n")
-
         if "-i" in argv or "-x" in argv:
-            return make_record(
-                smartctl_report("WRONG-SERIAL")
-            )
-
+            return make_record(smartctl_report("WRONG-SERIAL"))
         pytest.fail(f"Unexpected command: {argv}")
 
     configure_mocks(monkeypatch, simulated_command)
     output = tmp_path / "smartctl-wrong-serial"
 
-    result = collector.collect(
-        DEVICE,
-        EXPECTED_SERIAL,
-        output,
-    )
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
 
     assert result == 1
 
-    manifest = json.loads(
-        (output / "collection.json").read_text()
-    )
+    manifest = json.loads((output / "collection.json").read_text())
+    assert manifest["schema_version"] == "2.0"
+    assert collector.validate_manifest(manifest) == []
 
-    assert manifest["collection_status"] == "FAILED"
-    assert manifest["capture_complete"] is True
-    assert manifest["identity_successful"] is False
-    assert manifest["identity_checks"][
-        "smartctl_info_serial_matches"
-    ] is False
-    assert manifest["identity_checks"][
-        "smartctl_full_report_serial_matches"
-    ] is False
+    assert manifest["collection"]["status"] == "COMPLETE"
+    assert manifest["capture"]["status"] == "COMPLETE"
+    assert manifest["identity"]["status"] == "FAILED"
+    assert manifest["identity"]["checks"]["smartctl_info_serial_matches"] is False
+    assert manifest["identity"]["checks"]["smartctl_full_report_serial_matches"] is False
 
 
-def test_collect_fails_when_command_times_out(
-    tmp_path, monkeypatch
-):
+def test_collect_fails_when_command_times_out(tmp_path, monkeypatch):
     def simulated_command(argv):
         if "--version" in argv:
             return make_record(b"smartctl 7.5\n")
-
         if "--scan-open" in argv:
             return make_record(b"/dev/sda -d sat\n")
-
         if "-i" in argv:
             return make_record(smartctl_report())
-
         if "-x" in argv:
             return make_record(
                 stdout=smartctl_report(),
                 exit_code=None,
                 timed_out=True,
             )
-
         pytest.fail(f"Unexpected command: {argv}")
 
     configure_mocks(monkeypatch, simulated_command)
     output = tmp_path / "smartctl-timeout"
 
-    result = collector.collect(
-        DEVICE,
-        EXPECTED_SERIAL,
-        output,
-    )
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
 
     assert result == 1
 
-    manifest = json.loads(
-        (output / "collection.json").read_text()
+    manifest = json.loads((output / "collection.json").read_text())
+    assert manifest["schema_version"] == "2.0"
+    assert collector.validate_manifest(manifest) == []
+
+    full_report = next(
+        item for item in manifest["commands"]
+        if item["name"] == "device_full"
     )
 
-    full_report = manifest["commands"]["device_full"]
-
     assert full_report["timed_out"] is True
-    assert full_report["capture_complete"] is False
-    assert full_report["stdout_file"] == "device_full.stdout.bin"
+    assert full_report["execution_status"] == "TIMED_OUT"
+    assert full_report["exit_code"] is None
 
-    assert (
-        output / "device_full.stdout.bin"
-    ).read_bytes() == smartctl_report()
+    stdout_artifact = next(
+        artifact for artifact in manifest["artifacts"]
+        if artifact["path"] == "device_full.stdout.bin"
+    )
+    assert stdout_artifact["role"] == "stdout"
 
-    assert manifest["capture_complete"] is False
-    assert manifest["collection_status"] == "FAILED"
+    assert (output / "device_full.stdout.bin").read_bytes() == smartctl_report()
+
+    assert manifest["capture"]["status"] == "PARTIAL"
+    assert manifest["collection"]["status"] == "INCOMPLETE"
+    assert manifest["identity"]["status"] == "VERIFIED"
 
 
 def test_invalid_initial_device_prevents_command_execution(

@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
-"""Read-only smartctl evidence collector for OSE."""
+"""Read-only smartctl evidence collector for OSE Schema 2.0."""
 
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from ose.evidence_schema import validate_manifest
 
 
 EXIT_STATUS_BITS = {
@@ -24,6 +29,13 @@ EXIT_STATUS_BITS = {
     7: "selftest_log_records",
 }
 
+COMMAND_DEFINITIONS = (
+    ("version", "version"),
+    ("scan", "scan"),
+    ("device_info", "device_info"),
+    ("device_full", "device_full"),
+)
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
@@ -34,9 +46,15 @@ def sha256_bytes(data):
 
 
 def decode_exit_status(exit_code):
-    """Decode the smartctl eight-bit ATA exit-status bitmask."""
-    if not isinstance(exit_code, int) or not 0 <= exit_code <= 255:
-        raise ValueError("smartctl exit code must be an integer from 0 to 255")
+    """Decode smartctl's eight-bit ATA exit-status bitmask."""
+    if (
+        isinstance(exit_code, bool)
+        or not isinstance(exit_code, int)
+        or not 0 <= exit_code <= 255
+    ):
+        raise ValueError(
+            "smartctl exit code must be an integer from 0 to 255"
+        )
 
     flags = [
         name
@@ -66,10 +84,14 @@ def validate_device(target, expected_serial):
         raise RuntimeError("Selected path is not a whole disk")
 
     if (target.get("serial") or "").strip() != expected_serial:
-        raise RuntimeError("Linux device serial does not match expected serial")
+        raise RuntimeError(
+            "Linux device serial does not match expected serial"
+        )
 
-    if target.get("tran") != "usb":
-        raise RuntimeError("Selected device is not reported as USB-connected")
+    if (target.get("tran") or "").lower() != "usb":
+        raise RuntimeError(
+            "Selected device is not reported as USB-connected"
+        )
 
 
 def get_device_inventory(device, expected_serial):
@@ -84,13 +106,19 @@ def get_device_inventory(device, expected_serial):
     )
 
     inventory = json.loads(result.stdout)
-    target = next(
-        (
-            item for item in inventory.get("blockdevices", [])
-            if item.get("path") == device
-        ),
-        None,
-    )
+
+    def find_device(items):
+        for item in items:
+            if item.get("path") == device:
+                return item
+
+            found = find_device(item.get("children") or [])
+            if found is not None:
+                return found
+
+        return None
+
+    target = find_device(inventory.get("blockdevices", []))
 
     if target is None:
         raise RuntimeError("Selected device was not found by lsblk")
@@ -115,7 +143,9 @@ def run_command(argv, timeout=60):
         return {
             "started_utc": started,
             "finished_utc": utc_now(),
-            "duration_seconds": round(time.monotonic() - start_time, 3),
+            "duration_seconds": round(
+                time.monotonic() - start_time, 3
+            ),
             "argv": argv,
             "exit_code": result.returncode,
             "stdout": result.stdout or b"",
@@ -127,7 +157,9 @@ def run_command(argv, timeout=60):
         return {
             "started_utc": started,
             "finished_utc": utc_now(),
-            "duration_seconds": round(time.monotonic() - start_time, 3),
+            "duration_seconds": round(
+                time.monotonic() - start_time, 3
+            ),
             "argv": argv,
             "exit_code": None,
             "stdout": exc.stdout or b"",
@@ -137,56 +169,346 @@ def run_command(argv, timeout=60):
 
 
 def save_command_output(output_dir, name, record):
-    stdout_name = f"{name}.stdout.bin"
-    stderr_name = f"{name}.stderr.bin"
-
-    stdout = record["stdout"]
-    stderr = record["stderr"]
-
-    (output_dir / stdout_name).write_bytes(stdout)
-    (output_dir / stderr_name).write_bytes(stderr)
-
-    exit_code = record["exit_code"]
-    capture_complete = (
-        not record["timed_out"] and exit_code is not None
+    """Save raw stdout/stderr and return Schema 2.0 artifacts."""
+    streams = (
+        ("stdout", record["stdout"]),
+        ("stderr", record["stderr"]),
     )
 
-    metadata = {
+    artifacts = []
+    created_paths = []
+
+    try:
+        for role, data in streams:
+            artifact_id = f"{name}-{role}"
+            filename = f"{name}.{role}.bin"
+            artifact_path = output_dir / filename
+
+            created_paths.append(artifact_path)
+            artifact_path.write_bytes(data)
+
+            artifacts.append({
+                "artifact_id": artifact_id,
+                "role": role,
+                "path": filename,
+                "media_type": "application/octet-stream",
+                "size_bytes": len(data),
+                "hash": {
+                    "algorithm": "sha256",
+                    "value": sha256_bytes(data),
+                },
+            })
+
+    except Exception:
+        for artifact_path in created_paths:
+            try:
+                artifact_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+    return artifacts
+
+
+def build_command_record(name, record, artifacts):
+    timed_out = record["timed_out"]
+    exit_code = record["exit_code"]
+
+    extensions = {
+        "exit_code_zero": (
+            exit_code == 0 and not timed_out
+        ),
+        "smartctl_status": (
+            decode_exit_status(exit_code)
+            if isinstance(exit_code, int)
+            and not isinstance(exit_code, bool)
+            and 0 <= exit_code <= 255
+            else None
+        ),
+    }
+
+    return {
+        "command_id": f"cmd-{name}",
+        "name": name,
+        "argv": record["argv"],
         "started_utc": record["started_utc"],
         "finished_utc": record["finished_utc"],
         "duration_seconds": record["duration_seconds"],
-        "argv": record["argv"],
         "exit_code": exit_code,
-        "timed_out": record["timed_out"],
-        "stdout_file": stdout_name,
-        "stdout_size_bytes": len(stdout),
-        "stdout_sha256": sha256_bytes(stdout),
-        "stderr_file": stderr_name,
-        "stderr_size_bytes": len(stderr),
-        "stderr_sha256": sha256_bytes(stderr),
-        "capture_complete": capture_complete,
-        "exit_code_zero": exit_code == 0 and not record["timed_out"],
+        "timed_out": timed_out,
+        "execution_status": (
+            "TIMED_OUT" if timed_out else "COMPLETED"
+        ),
+        "artifact_ids": [
+            artifact["artifact_id"] for artifact in artifacts
+        ],
+        "extensions": extensions,
     }
 
-    if isinstance(exit_code, int) and 0 <= exit_code <= 255:
-        metadata["smartctl_status"] = decode_exit_status(exit_code)
-    else:
-        metadata["smartctl_status"] = None
 
-    return metadata
+def build_manifest(
+    collection_id,
+    started_utc,
+    finished_utc,
+    expected_serial,
+    executable,
+    device_type,
+    device_before,
+    device_after,
+    commands,
+    artifacts,
+    identity_checks,
+    collection_status,
+    capture_status,
+    identity_status,
+    collection_error=None,
+    post_check_error=None,
+):
+    collection = {
+        "collection_id": collection_id,
+        "collector": "OSE smartctl read-only collector",
+        "adapter": "smartctl",
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "status": collection_status,
+    }
+
+    if collection_error is not None:
+        collection["error"] = collection_error
+
+    checks = dict(identity_checks)
+
+    if post_check_error is not None:
+        checks["post_collection_inventory_error"] = (
+            post_check_error
+        )
+
+    return {
+        "schema_version": "2.0",
+        "collection": collection,
+        "target": {
+            "expected_identity": {
+                "serial": expected_serial,
+            },
+            "observations": {
+                "before": device_before,
+                "after": device_after,
+            },
+        },
+        "identity": {
+            "status": identity_status,
+            "checks": checks,
+        },
+        "commands": commands,
+        "artifacts": artifacts,
+        "capture": {
+            "status": capture_status,
+        },
+        "assessment": {
+            "status": "NOT_ASSESSED",
+        },
+        "safety": {
+            "read_only_collection": True,
+            "destructive_commands_executed": False,
+        },
+        "extensions": {
+            "smartctl": {
+                "executable": executable,
+                "device_type": device_type,
+                "exit_status_semantics": (
+                    "smartctl exit codes are bitmasks. A nonzero "
+                    "exit code does not by itself mean evidence "
+                    "capture failed."
+                ),
+                "diagnostic_assessment": "NOT_ASSESSED",
+            },
+        },
+    }
+
+
+def validate_output_artifacts(output_dir, artifacts):
+    """Verify declared artifacts and reject unsafe output contents."""
+    output_dir = Path(output_dir)
+
+    if output_dir.is_symlink() or not output_dir.is_dir():
+        raise ValueError(
+            "Collection output is not a regular directory"
+        )
+
+    root = output_dir.resolve(strict=True)
+    expected_paths = {}
+
+    for artifact in artifacts:
+        relative_path = artifact["path"]
+
+        if (
+            not isinstance(relative_path, str)
+            or not relative_path
+            or relative_path.startswith("/")
+            or "\\" in relative_path
+            or any(
+                part in {"", ".", ".."}
+                for part in relative_path.split("/")
+            )
+            or any(ord(char) < 32 or ord(char) == 127
+                   for char in relative_path)
+            or re.match(r"^[A-Za-z]:", relative_path)
+        ):
+            raise ValueError(
+                f"Unsafe artifact path: {relative_path!r}"
+            )
+
+        if relative_path in expected_paths:
+            raise ValueError(
+                f"Duplicate artifact path: {relative_path}"
+            )
+
+        expected_paths[relative_path] = artifact
+        artifact_path = output_dir
+
+        for part in relative_path.split("/"):
+            artifact_path = artifact_path / part
+
+            if artifact_path.is_symlink():
+                raise ValueError(
+                    f"Symlink found in artifact path: {relative_path}"
+                )
+
+        try:
+            file_stat = artifact_path.lstat()
+        except OSError as exc:
+            raise ValueError(
+                f"Cannot access artifact {relative_path}: {exc}"
+            ) from exc
+
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(
+                f"Artifact is not a regular file: {relative_path}"
+            )
+
+        resolved = artifact_path.resolve(strict=True)
+
+        if not resolved.is_relative_to(root):
+            raise ValueError(
+                f"Artifact escapes collection directory: {relative_path}"
+            )
+
+        data = artifact_path.read_bytes()
+
+        if len(data) != artifact["size_bytes"]:
+            raise ValueError(
+                f"Artifact size mismatch: {relative_path}"
+            )
+
+        if sha256_bytes(data) != artifact["hash"]["value"]:
+            raise ValueError(
+                f"Artifact SHA-256 mismatch: {relative_path}"
+            )
+
+    actual_paths = set()
+    actual_directories = set()
+
+    def raise_walk_error(error):
+        raise error
+
+    for current, directories, filenames in os.walk(
+        output_dir,
+        topdown=True,
+        followlinks=False,
+        onerror=raise_walk_error,
+    ):
+        current_path = Path(current)
+
+        for directory in directories:
+            directory_path = current_path / directory
+
+            if directory_path.is_symlink():
+                raise ValueError(
+                    f"Symlink directory found: {directory_path}"
+                )
+
+            actual_directories.add(
+                directory_path.relative_to(output_dir).as_posix()
+            )
+
+        for filename in filenames:
+            file_path = current_path / filename
+            file_stat = file_path.lstat()
+
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ValueError(
+                    f"Non-regular output file found: {file_path}"
+                )
+
+            actual_paths.add(
+                file_path.relative_to(output_dir).as_posix()
+            )
+
+    expected_set = set(expected_paths)
+
+    if actual_paths != expected_set:
+        missing = sorted(expected_set - actual_paths)
+        unexpected = sorted(actual_paths - expected_set)
+
+        raise ValueError(
+            "Collection output does not match declared artifacts. "
+            f"Missing: {missing}; unexpected: {unexpected}"
+        )
+
+    expected_directories = set()
+
+    for relative_path in expected_set:
+        parts = relative_path.split("/")
+        for index in range(1, len(parts)):
+            expected_directories.add("/".join(parts[:index]))
+
+    if actual_directories != expected_directories:
+        unexpected = sorted(
+            actual_directories - expected_directories
+        )
+        raise ValueError(
+            "Collection output contains unlisted directories: "
+            f"{unexpected}"
+        )
+
+
+def write_manifest(output_dir, evidence):
+    errors = validate_manifest(evidence)
+
+    if errors:
+        raise ValueError(
+            "Generated evidence manifest failed Schema 2.0 "
+            "validation:\n" + "\n".join(errors)
+        )
+
+    validate_output_artifacts(
+        output_dir,
+        evidence["artifacts"],
+    )
+
+    (output_dir / "collection.json").write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def collect(device, expected_serial, output_path, device_type="sat"):
     output_dir = Path(output_path)
 
     if output_dir.is_symlink():
-        raise RuntimeError("Output path must not be a symbolic link")
+        raise RuntimeError(
+            "Output directory must not be a symbolic link"
+        )
 
     if output_dir.exists():
-        raise RuntimeError("Output directory already exists; choose a new path")
+        raise RuntimeError(
+            "Output directory already exists; choose a new path"
+        )
 
     if device_type != "sat":
-        raise ValueError("Only the explicitly supported device type 'sat' is allowed")
+        raise ValueError(
+            "Only the explicitly supported device type 'sat' is allowed"
+        )
 
     executable = shutil.which("smartctl")
     sudo = shutil.which("sudo")
@@ -198,150 +520,191 @@ def collect(device, expected_serial, output_path, device_type="sat"):
         raise RuntimeError("sudo was not found in PATH")
 
     device_before = get_device_inventory(device, expected_serial)
-    validate_device(device_before, expected_serial)
 
     output_dir.mkdir(parents=True, exist_ok=False)
 
-    commands = {
-        "version": [executable, "--version"],
-        "scan": [sudo, "-n", executable, "--scan-open"],
-        "device_info": [
-            sudo, "-n", executable, "-i", "-d", device_type, device
-        ],
-        "device_full": [
-            sudo, "-n", executable, "-x", "-d", device_type, device
-        ],
-    }
+    collection_id = str(uuid.uuid4())
+    started_utc = utc_now()
 
-    records = {}
+    command_definitions = [
+        ("version", [executable, "--version"]),
+        ("scan", [sudo, "-n", executable, "--scan-open"]),
+        (
+            "device_info",
+            [sudo, "-n", executable, "-i", "-d", device_type, device],
+        ),
+        (
+            "device_full",
+            [sudo, "-n", executable, "-x", "-d", device_type, device],
+        ),
+    ]
+
+    commands = []
+    artifacts = []
     raw_outputs = {}
+    collection_error = None
+    post_check_error = None
+    device_after = None
 
     try:
-        for name, argv in commands.items():
+        for name, argv in command_definitions:
             print(f"Collecting: {name}")
-            raw = run_command(argv)
-            raw_outputs[name] = raw["stdout"]
-            records[name] = save_command_output(output_dir, name, raw)
+
+            record = run_command(argv)
+            command_artifacts = save_command_output(
+                output_dir,
+                name,
+                record,
+            )
+
+            command = build_command_record(
+                name,
+                record,
+                command_artifacts,
+            )
+
+            commands.append(command)
+            artifacts.extend(command_artifacts)
+            raw_outputs[name] = record["stdout"]
 
     except Exception as exc:
-        incomplete = {
-            "schema_version": "1.0",
-            "collector": "OSE smartctl read-only collector",
-            "collection_started_utc": (
-                next(iter(records.values()))["started_utc"]
-                if records else utc_now()
-            ),
-            "collection_finished_utc": utc_now(),
-            "device_before": device_before,
-            "device_after": None,
-            "expected_serial": expected_serial,
-            "device_type": device_type,
-            "smartctl_executable": executable,
-            "commands": records,
-            "collection_status": "INCOMPLETE",
-            "collection_error": {
-                "type": type(exc).__name__,
-                "message": str(exc),
-            },
-            "safety": {
-                "read_only_collection": True,
-                "destructive_commands_executed": False,
-            },
+        collection_error = {
+            "type": type(exc).__name__,
+            "message": str(exc),
         }
 
+    if collection_error is None:
         try:
-            (output_dir / "collection.json").write_text(
-                json.dumps(incomplete, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            device_after = get_device_inventory(
+                device,
+                expected_serial,
             )
-        except OSError as write_error:
-            print(f"Could not write incomplete manifest: {write_error}",
-                  file=sys.stderr)
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            subprocess.SubprocessError,
+        ) as exc:
+            post_check_error = str(exc)
 
-        print(f"Collection incomplete: {exc}", file=sys.stderr)
-        return 1
+    identity_checks = {}
+    identity_status = "NOT_CHECKED"
 
-    device_after = None
-    post_check_error = None
+    if collection_error is None:
+        info_serial = extract_ata_serial(
+            raw_outputs.get("device_info", b"")
+        )
+        full_serial = extract_ata_serial(
+            raw_outputs.get("device_full", b"")
+        )
 
-    try:
-        device_after = get_device_inventory(device, expected_serial)
-        validate_device(device_after, expected_serial)
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        post_check_error = str(exc)
+        identity_checks = {
+            "linux_serial_before_matches": (
+                (device_before.get("serial") or "").strip()
+                == expected_serial
+            ),
+            "linux_serial_after_matches": (
+                device_after is not None
+                and (
+                    device_after.get("serial") or ""
+                ).strip() == expected_serial
+            ),
+            "linux_usb_transport_after_matches": (
+                device_after is not None
+                and (
+                    device_after.get("tran") or ""
+                ).lower() == "usb"
+            ),
+            "smartctl_info_serial": info_serial,
+            "smartctl_info_serial_matches": (
+                info_serial == expected_serial
+            ),
+            "smartctl_full_report_serial": full_serial,
+            "smartctl_full_report_serial_matches": (
+                full_serial == expected_serial
+            ),
+        }
 
-    reported_serial = extract_ata_serial(raw_outputs.get("device_info", b""))
-    full_report_serial = extract_ata_serial(raw_outputs.get("device_full", b""))
+        identity_successful = all([
+            identity_checks["linux_serial_before_matches"],
+            identity_checks["linux_serial_after_matches"],
+            identity_checks["linux_usb_transport_after_matches"],
+            identity_checks["smartctl_info_serial_matches"],
+            identity_checks["smartctl_full_report_serial_matches"],
+            post_check_error is None,
+        ])
 
-    identity_checks = {
-        "linux_serial_before_matches": (
-            (device_before.get("serial") or "").strip() == expected_serial
-        ),
-        "linux_serial_after_matches": (
-            device_after is not None
-            and (device_after.get("serial") or "").strip() == expected_serial
-        ),
-        "smartctl_info_serial": reported_serial,
-        "smartctl_info_serial_matches": reported_serial == expected_serial,
-        "smartctl_full_report_serial": full_report_serial,
-        "smartctl_full_report_serial_matches": (
-            full_report_serial == expected_serial
-        ),
-        "post_collection_inventory_error": post_check_error,
-    }
+        identity_status = (
+            "VERIFIED" if identity_successful else "FAILED"
+        )
 
-    capture_complete = all(
-        item["capture_complete"] for item in records.values()
+    capture_complete = (
+        len(commands) == len(command_definitions)
+        and len(artifacts) == len(command_definitions) * 2
+        and all(
+            command["execution_status"] == "COMPLETED"
+            for command in commands
+        )
     )
 
-    identity_successful = all([
-        identity_checks["linux_serial_before_matches"],
-        identity_checks["linux_serial_after_matches"],
-        identity_checks["smartctl_info_serial_matches"],
-        identity_checks["smartctl_full_report_serial_matches"],
-        post_check_error is None,
-    ])
+    if capture_complete:
+        capture_status = "COMPLETE"
+    elif artifacts:
+        capture_status = "PARTIAL"
+    else:
+        capture_status = "INCOMPLETE"
 
-    evidence = {
-        "schema_version": "1.0",
-        "collector": "OSE smartctl read-only collector",
-        "collection_started_utc": records["version"]["started_utc"],
-        "collection_finished_utc": utc_now(),
-        "device_before": device_before,
-        "device_after": device_after,
-        "expected_serial": expected_serial,
-        "device_type": device_type,
-        "smartctl_executable": executable,
-        "commands": records,
-        "identity_checks": identity_checks,
-        "capture_complete": capture_complete,
-        "identity_successful": identity_successful,
-        "collection_status": (
-            "SUCCESS" if capture_complete and identity_successful
-            else "FAILED"
-        ),
-        "safety": {
-            "read_only_collection": True,
-            "destructive_commands_executed": False,
-        },
-        "interpretation": (
-            "Collection status describes evidence capture and identity checks. "
-            "It is not a sanitization verdict or a statement that the device "
-            "is healthy. Review each smartctl exit-status bit and report."
-        ),
-    }
-
-    (output_dir / "collection.json").write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    collection_complete = (
+        collection_error is None
+        and post_check_error is None
+        and len(commands) == len(command_definitions)
+        and all(
+            command["execution_status"] == "COMPLETED"
+            for command in commands
+        )
     )
+
+    collection_status = (
+        "COMPLETE" if collection_complete else "INCOMPLETE"
+    )
+
+    evidence = build_manifest(
+        collection_id=collection_id,
+        started_utc=started_utc,
+        finished_utc=utc_now(),
+        expected_serial=expected_serial,
+        executable=executable,
+        device_type=device_type,
+        device_before=device_before,
+        device_after=device_after,
+        commands=commands,
+        artifacts=artifacts,
+        identity_checks=identity_checks,
+        collection_status=collection_status,
+        capture_status=capture_status,
+        identity_status=identity_status,
+        collection_error=collection_error,
+        post_check_error=post_check_error,
+    )
+
+    write_manifest(output_dir, evidence)
 
     print(f"\nCollection saved to: {output_dir}")
-    print(f"Collection status: {evidence['collection_status']}")
-    print(f"SMART-reported serial: {reported_serial}")
+    print(f"Collection status: {collection_status}")
+    print(f"Capture status: {capture_status}")
+    print(f"Identity status: {identity_status}")
+    print("Assessment status: NOT_ASSESSED")
     print("No self-tests, erase, or sanitize commands were executed.")
 
-    return 0 if evidence["collection_status"] == "SUCCESS" else 1
+    # Nonzero smartctl exit statuses are diagnostic evidence, not
+    # automatic capture failures. Preserve their meaning in extensions.
+    return (
+        0
+        if collection_complete
+        and capture_complete
+        and identity_status == "VERIFIED"
+        else 1
+    )
 
 
 def main():
@@ -362,7 +725,10 @@ def main():
             device_type=args.device_type,
         )
     except (
-        OSError, ValueError, RuntimeError, subprocess.SubprocessError
+        OSError,
+        ValueError,
+        RuntimeError,
+        subprocess.SubprocessError,
     ) as exc:
         print(f"Collection failed: {exc}", file=sys.stderr)
         return 1
