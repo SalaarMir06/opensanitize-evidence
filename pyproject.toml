@@ -9,6 +9,7 @@ description = "Open-source disk sanitization evidence integrity and verification
 requires-python = ">=3.10"
 dependencies = [
     "cryptography>=45.0",
+    "jsonschema[format]>=4.20",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +19,9 @@ dev = [
 
 [project.scripts]
 ose = "ose.cli:main"
+
+[tool.setuptools.package-data]
+ose = ["schemas/*.json"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
