@@ -307,6 +307,11 @@ def validate_output_artifacts(output_dir, artifacts):
                 part in {"", ".", ".."}
                 for part in relative_path.split("/")
             )
+            or any(
+                ord(char) < 32 or ord(char) == 127
+                for char in relative_path
+            )
+            or re.match(r"^[A-Za-z]:", relative_path)
         ):
             raise ValueError(
                 f"Unsafe artifact path: {relative_path!r}"
