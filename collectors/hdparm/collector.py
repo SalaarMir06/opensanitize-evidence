@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -436,10 +437,37 @@ def write_manifest(output_dir, evidence):
         evidence["artifacts"],
     )
 
-    (output_dir / "collection.json").write_text(
-        json.dumps(evidence, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    manifest_data = (
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n"
     )
+    manifest_path = output_dir / "collection.json"
+    temporary_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output_dir,
+            prefix=".collection.json.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(manifest_data)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        os.replace(temporary_path, manifest_path)
+        temporary_path = None
+
+    except Exception:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        raise
 
 
 def collect(device, expected_serial, output_path):
