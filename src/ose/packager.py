@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ose.crypto import sha256_file, sign_data
+from ose.collection_validation import validate_collection_directory
 
 
 def canonical_json(data: dict) -> bytes:
@@ -35,6 +36,14 @@ def create_package(
 
     if not source.is_dir():
         raise ValueError(f"Evidence directory does not exist: {source}")
+
+    has_collection_manifest = (
+        (source / "collection.json").exists()
+        or (source / "collection.json").is_symlink()
+    )
+
+    if has_collection_manifest:
+        validate_collection_directory(source)
 
     if output == source or source in output.parents:
         raise ValueError("Output directory cannot be inside the source directory.")
@@ -82,6 +91,10 @@ def create_package(
             "size_bytes": destination.stat().st_size,
             "sha256": sha256_file(destination),
         })
+
+    # Validate the copied snapshot, not just the original source.
+    if has_collection_manifest:
+        validate_collection_directory(package_evidence)
 
     manifest = {
         "schema_version": "1.0",

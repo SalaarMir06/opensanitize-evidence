@@ -4,6 +4,7 @@ import re
 from pathlib import Path, PurePosixPath
 
 from ose.crypto import verify_signature
+from ose.collection_validation import validate_collection_directory
 
 
 def verify_package(
@@ -185,6 +186,15 @@ def verify_package(
 
     for missing in sorted(expected_files - actual_files):
         errors.append(f"Evidence file missing from package: {missing}")
+
+    if (
+        not errors
+        and (evidence_dir / "collection.json").exists()
+    ):
+        try:
+            validate_collection_directory(evidence_dir)
+        except (OSError, ValueError) as exc:
+            errors.append(f"Collection validation failed: {exc}")
 
     return {
         "valid": not errors,
