@@ -74,3 +74,16 @@ def test_modified_signature_is_rejected(tmp_path):
         signature[:-4] + "AAAA",
         public_key,
     )
+
+
+def test_valid_signature_with_public_key_bytes(tmp_path):
+    private_key = tmp_path / "private.pem"
+    public_key = tmp_path / "public.pem"
+
+    generate_key_pair(private_key, public_key)
+
+    message = b"Test evidence manifest"
+    signature = sign_data(message, private_key)
+    public_key_bytes = public_key.read_bytes()
+
+    assert verify_signature(message, signature, public_key_bytes)

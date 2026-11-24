@@ -1,10 +1,86 @@
 import hashlib
 import json
+import os
 import re
+import stat
 from pathlib import Path, PurePosixPath
 
 from ose.crypto import verify_signature
 from ose.collection_validation import validate_collection_directory
+
+
+def _read_regular_file(path: Path) -> bytes:
+    """Read a regular file without following a symbolic link."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    descriptor = os.open(path, flags)
+
+    try:
+        file_stat = os.fstat(descriptor)
+
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError(f"Not a regular file: {path}")
+
+        with os.fdopen(descriptor, "rb") as file:
+            descriptor = -1
+            return file.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _scan_evidence_tree(evidence_dir: Path, errors: list) -> set:
+    """Find regular files and reject links or special filesystem entries."""
+    actual_files = set()
+
+    def raise_walk_error(exc):
+        errors.append(f"Could not scan evidence directory: {exc}")
+
+    for root, dirnames, filenames in os.walk(
+        evidence_dir,
+        topdown=True,
+        followlinks=False,
+        onerror=raise_walk_error,
+    ):
+        root_path = Path(root)
+        safe_dirnames = []
+
+        for dirname in dirnames:
+            item = root_path / dirname
+
+            try:
+                item_stat = item.lstat()
+            except OSError as exc:
+                errors.append(f"Could not inspect evidence entry {item}: {exc}")
+                continue
+
+            if stat.S_ISLNK(item_stat.st_mode):
+                errors.append(f"Symbolic link found in evidence directory: {item}")
+            elif stat.S_ISDIR(item_stat.st_mode):
+                safe_dirnames.append(dirname)
+            else:
+                errors.append(f"Non-directory entry found in evidence tree: {item}")
+
+        dirnames[:] = safe_dirnames
+
+        for filename in filenames:
+            item = root_path / filename
+
+            try:
+                item_stat = item.lstat()
+            except OSError as exc:
+                errors.append(f"Could not inspect evidence entry {item}: {exc}")
+                continue
+
+            relative_name = item.relative_to(evidence_dir).as_posix()
+
+            if stat.S_ISLNK(item_stat.st_mode):
+                errors.append(f"Symbolic link found in evidence directory: {item}")
+            elif stat.S_ISREG(item_stat.st_mode):
+                actual_files.add(relative_name)
+            else:
+                errors.append(f"Non-regular file found in evidence directory: {item}")
+
+    return actual_files
 
 
 def verify_package(
@@ -16,45 +92,59 @@ def verify_package(
 
     This verifies integrity, not whether sanitization succeeded.
     """
-    package = Path(package_dir).resolve()
+    package_candidate = Path(package_dir).expanduser()
     public_key = Path(public_key_path)
 
     errors = []
     checked_files = 0
 
+    try:
+        package_stat = package_candidate.lstat()
+    except OSError:
+        return {
+            "valid": False,
+            "checked_files": 0,
+            "errors": ["Package directory does not exist or cannot be inspected."],
+        }
+
+    if not stat.S_ISDIR(package_stat.st_mode):
+        return {
+            "valid": False,
+            "checked_files": 0,
+            "errors": ["Package path must be a real directory, not a symbolic link."],
+        }
+
+    package = package_candidate.resolve()
     manifest_path = package / "manifest.json"
     signature_path = package / "manifest.sig"
     evidence_dir = package / "evidence"
 
-    if not package.is_dir():
+    try:
+        public_key_stat = public_key.lstat()
+    except OSError:
         return {
             "valid": False,
             "checked_files": 0,
-            "errors": ["Package directory does not exist."],
+            "errors": ["Public key file does not exist or cannot be inspected."],
         }
 
-    if not manifest_path.is_file() or not signature_path.is_file():
+    if not stat.S_ISREG(public_key_stat.st_mode):
         return {
             "valid": False,
             "checked_files": 0,
-            "errors": ["Manifest or signature file is missing."],
-        }
-
-    if not public_key.is_file():
-        return {
-            "valid": False,
-            "checked_files": 0,
-            "errors": ["Public key file does not exist."],
+            "errors": ["Public key path must be a regular file, not a symbolic link."],
         }
 
     try:
-        manifest_bytes = manifest_path.read_bytes()
-        signature = signature_path.read_text(encoding="ascii").strip()
+        public_key_bytes = _read_regular_file(public_key)
+        manifest_bytes = _read_regular_file(manifest_path)
+        signature_bytes = _read_regular_file(signature_path)
+        signature = signature_bytes.decode("ascii").strip()
 
         if not verify_signature(
             manifest_bytes,
             signature,
-            public_key,
+            public_key_bytes,
         ):
             return {
                 "valid": False,
@@ -84,25 +174,25 @@ def verify_package(
     if manifest.get("hash_algorithm") != "SHA-256":
         errors.append("Unsupported hash algorithm.")
 
+    if manifest.get("signature_algorithm") != "Ed25519":
+        errors.append("Unsupported signature algorithm.")
+
     if not isinstance(manifest.get("evidence_files"), list):
         errors.append("Manifest evidence_files must be a list.")
         entries = []
     else:
         entries = manifest["evidence_files"]
 
-    if not evidence_dir.is_dir() or evidence_dir.is_symlink():
-        errors.append("Evidence directory is missing or is a symbolic link.")
+    try:
+        evidence_stat = evidence_dir.lstat()
+    except OSError:
+        evidence_stat = None
+
+    if evidence_stat is None or not stat.S_ISDIR(evidence_stat.st_mode):
+        errors.append("Evidence directory is missing or is not a real directory.")
         actual_files = set()
     else:
-        actual_files = set()
-
-        for item in evidence_dir.rglob("*"):
-            if item.is_symlink():
-                errors.append(
-                    f"Symbolic link found in evidence directory: {item}"
-                )
-            elif item.is_file():
-                actual_files.add(item.relative_to(evidence_dir).as_posix())
+        actual_files = _scan_evidence_tree(evidence_dir, errors)
 
     expected_files = set()
 
@@ -124,24 +214,13 @@ def verify_package(
             or not relative_path.parts
             or ".." in relative_path.parts
             or "\\" in relative_name
+            or relative_path.as_posix() != relative_name
             or relative_name in expected_files
         ):
             errors.append(f"Unsafe or duplicate evidence path: {relative_name}")
             continue
 
         expected_files.add(relative_name)
-        evidence_file = evidence_dir.joinpath(*relative_path.parts)
-
-        try:
-            resolved = evidence_file.resolve(strict=True)
-            resolved.relative_to(evidence_dir.resolve(strict=True))
-        except (OSError, ValueError):
-            errors.append(f"Missing or unsafe evidence file: {relative_name}")
-            continue
-
-        if evidence_file.is_symlink() or not resolved.is_file():
-            errors.append(f"Evidence entry is not a regular file: {relative_name}")
-            continue
 
         expected_hash = entry.get("sha256")
         expected_size = entry.get("size_bytes")
@@ -161,16 +240,42 @@ def verify_package(
             errors.append(f"Invalid file size: {relative_name}")
             continue
 
-        digest = hashlib.sha256()
-        actual_size = 0
+        if relative_name not in actual_files:
+            errors.append(f"Missing or unsafe evidence file: {relative_name}")
+            continue
+
+        evidence_file = evidence_dir.joinpath(*relative_path.parts)
 
         try:
-            with resolved.open("rb") as file:
-                for chunk in iter(lambda: file.read(1024 * 1024), b""):
-                    digest.update(chunk)
-                    actual_size += len(chunk)
-        except OSError as exc:
-            errors.append(f"Could not read {relative_name}: {exc}")
+            descriptor = os.open(
+                evidence_file,
+                os.O_RDONLY | os.O_NOFOLLOW,
+            )
+
+            try:
+                file_stat = os.fstat(descriptor)
+
+                if not stat.S_ISREG(file_stat.st_mode):
+                    raise ValueError("Evidence entry is not a regular file.")
+
+                digest = hashlib.sha256()
+                actual_size = 0
+
+                with os.fdopen(descriptor, "rb") as file:
+                    descriptor = -1
+
+                    for chunk in iter(
+                        lambda: file.read(1024 * 1024),
+                        b"",
+                    ):
+                        digest.update(chunk)
+                        actual_size += len(chunk)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+
+        except (OSError, ValueError) as exc:
+            errors.append(f"Could not safely read {relative_name}: {exc}")
             continue
 
         checked_files += 1
@@ -185,15 +290,14 @@ def verify_package(
         errors.append(f"Unexpected evidence file: {unexpected}")
 
     for missing in sorted(expected_files - actual_files):
-        errors.append(f"Evidence file missing from package: {missing}")
+        message = f"Evidence file missing from package: {missing}"
+        if message not in errors:
+            errors.append(message)
 
-    if (
-        not errors
-        and (evidence_dir / "collection.json").exists()
-    ):
+    if not errors and "collection.json" in actual_files:
         try:
             validate_collection_directory(evidence_dir)
-        except (OSError, ValueError) as exc:
+        except Exception as exc:
             errors.append(f"Collection validation failed: {exc}")
 
     return {

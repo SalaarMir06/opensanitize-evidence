@@ -69,12 +69,15 @@ def sign_data(data: bytes, private_key_path: str | Path) -> str:
 def verify_signature(
     data: bytes,
     signature: str,
-    public_key_path: str | Path,
+    public_key_path: str | Path | bytes,
 ) -> bool:
-    """Verify an Ed25519 signature. Return False for invalid signatures."""
-    public_key = serialization.load_pem_public_key(
-        Path(public_key_path).read_bytes()
-    )
+    """Verify an Ed25519 signature using a key path or PEM bytes."""
+    if isinstance(public_key_path, bytes):
+        public_key_bytes = public_key_path
+    else:
+        public_key_bytes = Path(public_key_path).read_bytes()
+
+    public_key = serialization.load_pem_public_key(public_key_bytes)
 
     if not isinstance(public_key, Ed25519PublicKey):
         raise TypeError("The supplied key is not an Ed25519 public key.")

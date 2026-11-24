@@ -184,3 +184,90 @@ def test_invalid_embedded_collection_manifest_fails_verification(tmp_path):
         "Collection validation failed" in error
         for error in result["errors"]
     )
+
+
+def test_symbolic_link_package_root_is_rejected(tmp_path):
+    package, public_key = make_package(tmp_path)
+    package_link = tmp_path / "package-link"
+    package_link.symlink_to(package, target_is_directory=True)
+
+    result = verify_package(package_link, public_key)
+
+    assert result["valid"] is False
+
+
+def test_symbolic_link_manifest_is_rejected(tmp_path):
+    package, public_key = make_package(tmp_path)
+    manifest = package / "manifest.json"
+    original = package / "manifest-original.json"
+
+    manifest.rename(original)
+    manifest.symlink_to(original)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+
+
+def test_symbolic_link_signature_is_rejected(tmp_path):
+    package, public_key = make_package(tmp_path)
+    signature = package / "manifest.sig"
+    original = package / "signature-original.sig"
+
+    signature.rename(original)
+    signature.symlink_to(original)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+
+
+def test_fifo_in_evidence_directory_is_rejected(tmp_path):
+    import os
+
+    package, public_key = make_package(tmp_path)
+    fifo = package / "evidence" / "unexpected.fifo"
+    os.mkfifo(fifo)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+
+
+def test_symbolic_link_nested_evidence_directory_is_rejected(tmp_path):
+    package, public_key = make_package(tmp_path)
+
+    evidence_dir = package / "evidence"
+    nested_dir = evidence_dir / "nested"
+    nested_dir.mkdir()
+
+    (nested_dir / "extra.log").write_text(
+        "Unexpected evidence\n",
+        encoding="utf-8",
+    )
+
+    external_dir = tmp_path / "external"
+    external_dir.mkdir()
+
+    nested_dir.rename(external_dir)
+    nested_dir.symlink_to(external_dir, target_is_directory=True)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any(
+        "Symbolic link" in error
+        for error in result["errors"]
+    )
+
+
+def test_symbolic_link_public_key_is_rejected(tmp_path):
+    package, public_key = make_package(tmp_path)
+
+    original_key = tmp_path / "original-public.pem"
+    public_key.rename(original_key)
+    public_key.symlink_to(original_key)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
