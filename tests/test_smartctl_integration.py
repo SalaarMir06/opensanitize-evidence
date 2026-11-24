@@ -254,7 +254,8 @@ def test_collect_fails_when_command_times_out(tmp_path, monkeypatch):
 
     assert manifest["capture"]["status"] == "PARTIAL"
     assert manifest["collection"]["status"] == "INCOMPLETE"
-    assert manifest["identity"]["status"] == "VERIFIED"
+    assert manifest["identity"]["status"] == "NOT_CHECKED"
+    assert manifest["identity"]["checks"] == {}
 
 
 def test_invalid_initial_device_prevents_command_execution(
@@ -301,3 +302,33 @@ def test_invalid_initial_device_prevents_command_execution(
 
     assert calls == []
     assert not output.exists()
+
+
+def test_identity_verified_when_unrelated_version_command_times_out(
+    tmp_path, monkeypatch
+):
+    def simulated_command(argv):
+        if "--version" in argv:
+            return make_record(
+                stdout=b"Partial version output",
+                exit_code=None,
+                timed_out=True,
+            )
+        if "--scan-open" in argv:
+            return make_record(b"/dev/sda -d sat\\n")
+        if "-i" in argv or "-x" in argv:
+            return make_record(smartctl_report())
+        pytest.fail(f"Unexpected command: {argv}")
+
+    configure_mocks(monkeypatch, simulated_command)
+    output = tmp_path / "smartctl-version-timeout"
+
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
+
+    manifest = json.loads((output / "collection.json").read_text())
+    assert collector.validate_manifest(manifest) == []
+
+    assert result == 1
+    assert manifest["collection"]["status"] == "INCOMPLETE"
+    assert manifest["capture"]["status"] == "PARTIAL"
+    assert manifest["identity"]["status"] == "VERIFIED"

@@ -405,3 +405,37 @@ def test_command_exception_writes_incomplete_manifest(
     assert manifest["identity"]["status"] == "NOT_CHECKED"
     assert manifest["collection"]["error"]["type"] == "OSError"
     assert manifest["safety"]["destructive_commands_executed"] is False
+
+
+def test_identity_verified_when_unrelated_version_command_times_out(
+    monkeypatch, tmp_path
+):
+    def fake_run_command(argv, timeout=60):
+        if argv[-1] == "-V":
+            return make_record(
+                argv,
+                stdout=b"Partial version output",
+                exit_code=None,
+                timed_out=True,
+            )
+
+        return make_record(
+            argv,
+            stdout=b"Serial Number: TEST-SERIAL-0001\n",
+        )
+
+    setup_collector(monkeypatch, fake_run_command)
+
+    output = tmp_path / "hdparm-version-timeout"
+    result = collector.collect(
+        "/dev/sda",
+        EXPECTED_SERIAL,
+        output,
+    )
+
+    manifest = read_manifest(output)
+
+    assert result == 1
+    assert manifest["collection"]["status"] == "INCOMPLETE"
+    assert manifest["capture"]["status"] == "PARTIAL"
+    assert manifest["identity"]["status"] == "VERIFIED"

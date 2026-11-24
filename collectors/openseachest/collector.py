@@ -554,7 +554,16 @@ def collect(device, expected_serial, output_path):
     identity_checks = {}
     identity_status = "NOT_CHECKED"
 
-    if collection_error is None:
+    identity_commands_completed = all(
+        any(
+            command["name"] == required_name
+            and command["execution_status"] == "COMPLETED"
+            for command in commands
+        )
+        for required_name in ("usb_scan", "sat_info")
+    )
+
+    if collection_error is None and identity_commands_completed:
         ata_serial = extract_ata_serial(sat_output)
         scan_text = scan_output.decode(
             "utf-8",

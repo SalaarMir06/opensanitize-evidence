@@ -530,11 +530,13 @@ def collect(device, expected_serial, output_path):
     identity_checks = {}
     identity_status = "NOT_CHECKED"
 
-    has_timeout = any(
-        command["timed_out"] for command in commands
+    identify_completed = any(
+        command["name"] == "identify"
+        and command["execution_status"] == "COMPLETED"
+        for command in commands
     )
 
-    if collection_error is None and not has_timeout:
+    if collection_error is None and identify_completed:
         reported_serial = extract_ata_serial(
             raw_outputs.get("identify", b"")
         )

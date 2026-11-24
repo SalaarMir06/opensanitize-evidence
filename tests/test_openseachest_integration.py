@@ -534,3 +534,29 @@ def test_collect_records_incomplete_status_on_output_save_exception(
     ] == ["version", "usb_scan"]
 
     assert len(evidence["artifacts"]) == 4
+
+
+@pytest.mark.parametrize("command_name", ["usb_scan", "sat_info"])
+def test_identity_not_checked_when_identity_command_times_out(
+    monkeypatch, tmp_path, command_name
+):
+    configure_collector(
+        monkeypatch,
+        failures={command_name: "timeout"},
+    )
+    output = tmp_path / f"{command_name}-timeout"
+
+    result = collector.collect(
+        "/dev/sda",
+        EXPECTED_SERIAL,
+        output,
+    )
+
+    evidence = read_manifest(output)
+    assert_manifest_valid(evidence)
+
+    assert result == 1
+    assert evidence["collection"]["status"] == "INCOMPLETE"
+    assert evidence["capture"]["status"] == "PARTIAL"
+    assert evidence["identity"]["status"] == "NOT_CHECKED"
+    assert evidence["identity"]["checks"] == {}

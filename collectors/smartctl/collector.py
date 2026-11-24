@@ -590,7 +590,16 @@ def collect(device, expected_serial, output_path, device_type="sat"):
     identity_checks = {}
     identity_status = "NOT_CHECKED"
 
-    if collection_error is None:
+    identity_commands_completed = all(
+        any(
+            command["name"] == required_name
+            and command["execution_status"] == "COMPLETED"
+            for command in commands
+        )
+        for required_name in ("device_info", "device_full")
+    )
+
+    if collection_error is None and identity_commands_completed:
         info_serial = extract_ata_serial(
             raw_outputs.get("device_info", b"")
         )
