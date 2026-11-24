@@ -407,6 +407,61 @@ def test_command_exception_writes_incomplete_manifest(
     assert manifest["safety"]["destructive_commands_executed"] is False
 
 
+
+def test_collect_records_command_when_output_save_fails(
+    monkeypatch, tmp_path
+):
+    def fake_run_command(argv, timeout=60):
+        if argv[-1] == "-V":
+            return make_record(argv, stdout=b"hdparm v9.65\\n")
+
+        return make_record(
+            argv,
+            stdout=b"Serial Number: TEST-SERIAL-0001\\n",
+        )
+
+    setup_collector(monkeypatch, fake_run_command)
+    original_save = collector.save_command_output
+
+    def failing_save(output_dir, name, record):
+        if name == "identify":
+            raise OSError("simulated hdparm evidence write failure")
+        return original_save(output_dir, name, record)
+
+    monkeypatch.setattr(
+        collector,
+        "save_command_output",
+        failing_save,
+    )
+
+    output = tmp_path / "hdparm-save-failure"
+    result = collector.collect(
+        "/dev/sda",
+        EXPECTED_SERIAL,
+        output,
+    )
+
+    manifest = read_manifest(output)
+
+    assert result == 1
+    assert manifest["collection"]["status"] == "INCOMPLETE"
+    assert manifest["capture"]["status"] == "PARTIAL"
+    assert manifest["identity"]["status"] == "NOT_CHECKED"
+    assert manifest["collection"]["error"]["type"] == "OSError"
+
+    failed_command = manifest["commands"][-1]
+    assert failed_command["name"] == "identify"
+    assert failed_command["execution_status"] == "COMPLETED"
+    assert failed_command["exit_code"] == 0
+    assert failed_command["artifact_ids"] == []
+
+    assert len(manifest["commands"]) == 2
+    assert len(manifest["artifacts"]) == 2
+    assert all(
+        (output / artifact["path"]).is_file()
+        for artifact in manifest["artifacts"]
+    )
+
 def test_identity_verified_when_unrelated_version_command_times_out(
     monkeypatch, tmp_path
 ):

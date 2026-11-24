@@ -3,12 +3,15 @@ import hashlib
 import pytest
 
 from collectors.openseachest.collector import (
+    save_command_output as save_openseachest,
     validate_output_artifacts as validate_openseachest,
 )
 from collectors.smartctl.collector import (
+    save_command_output as save_smartctl,
     validate_output_artifacts as validate_smartctl,
 )
 from collectors.hdparm.collector import (
+    save_command_output as save_hdparm,
     validate_output_artifacts as validate_hdparm,
 )
 
@@ -32,6 +35,69 @@ def make_artifact(path, data):
             "value": hashlib.sha256(data).hexdigest(),
         },
     }
+
+
+SAVE_HELPERS = [
+    pytest.param(
+        save_openseachest,
+        validate_openseachest,
+        id="openseachest",
+    ),
+    pytest.param(
+        save_smartctl,
+        validate_smartctl,
+        id="smartctl",
+    ),
+    pytest.param(
+        save_hdparm,
+        validate_hdparm,
+        id="hdparm",
+    ),
+]
+
+
+@pytest.mark.parametrize("save_helper,validator", SAVE_HELPERS)
+def test_save_cleanup_failure_leaves_file_rejected_by_validator(
+    tmp_path,
+    monkeypatch,
+    save_helper,
+    validator,
+):
+    from pathlib import Path
+
+    output_dir = tmp_path / "collection"
+    output_dir.mkdir()
+
+    original_write_bytes = Path.write_bytes
+    original_unlink = Path.unlink
+
+    def failing_write_bytes(path, data):
+        if path.name == "test.stderr.bin":
+            raise OSError("simulated stderr write failure")
+        return original_write_bytes(path, data)
+
+    def failing_unlink(path, *args, **kwargs):
+        if path.name == "test.stdout.bin":
+            raise OSError("simulated stdout cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_bytes", failing_write_bytes)
+    monkeypatch.setattr(Path, "unlink", failing_unlink)
+
+    record = {
+        "stdout": b"partially saved stdout",
+        "stderr": b"stderr that cannot be saved",
+    }
+
+    with pytest.raises(OSError, match="stderr write failure"):
+        save_helper(output_dir, "test", record)
+
+    leftover = output_dir / "test.stdout.bin"
+    assert leftover.is_file()
+    assert leftover.read_bytes() == record["stdout"]
+
+    with pytest.raises(ValueError, match="unexpected"):
+        validator(output_dir, [])
 
 
 @pytest.mark.parametrize("validator", VALIDATORS)

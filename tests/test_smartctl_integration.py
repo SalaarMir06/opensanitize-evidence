@@ -304,6 +304,49 @@ def test_invalid_initial_device_prevents_command_execution(
     assert not output.exists()
 
 
+
+def test_collect_records_command_when_output_save_fails(
+    tmp_path, monkeypatch
+):
+    configure_mocks(monkeypatch)
+    original_save = collector.save_command_output
+
+    def failing_save(output_dir, name, record):
+        if name == "device_full":
+            raise OSError("simulated smartctl evidence write failure")
+        return original_save(output_dir, name, record)
+
+    monkeypatch.setattr(
+        collector,
+        "save_command_output",
+        failing_save,
+    )
+
+    output = tmp_path / "smartctl-save-failure"
+    result = collector.collect(DEVICE, EXPECTED_SERIAL, output)
+
+    manifest = json.loads((output / "collection.json").read_text())
+    assert collector.validate_manifest(manifest) == []
+
+    assert result == 1
+    assert manifest["collection"]["status"] == "INCOMPLETE"
+    assert manifest["capture"]["status"] == "PARTIAL"
+    assert manifest["identity"]["status"] == "NOT_CHECKED"
+    assert manifest["collection"]["error"]["type"] == "OSError"
+
+    failed_command = manifest["commands"][-1]
+    assert failed_command["name"] == "device_full"
+    assert failed_command["execution_status"] == "COMPLETED"
+    assert failed_command["exit_code"] == 0
+    assert failed_command["artifact_ids"] == []
+
+    assert len(manifest["commands"]) == 4
+    assert len(manifest["artifacts"]) == 6
+    assert all(
+        (output / artifact["path"]).is_file()
+        for artifact in manifest["artifacts"]
+    )
+
 def test_identity_verified_when_unrelated_version_command_times_out(
     tmp_path, monkeypatch
 ):

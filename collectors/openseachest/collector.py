@@ -511,20 +511,18 @@ def collect(device, expected_serial, output_path):
     try:
         for name, argv in command_definitions:
             record = run_command(argv)
+            command = build_command_record(name, record, [])
+            commands.append(command)
 
             command_artifacts = save_command_output(
                 output_dir,
                 name,
                 record,
             )
-
-            command = build_command_record(
-                name,
-                record,
-                command_artifacts,
-            )
-
-            commands.append(command)
+            command["artifact_ids"] = [
+                artifact["artifact_id"]
+                for artifact in command_artifacts
+            ]
             artifacts.extend(command_artifacts)
 
             if name == "sat_info":

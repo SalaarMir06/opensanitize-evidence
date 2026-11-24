@@ -150,8 +150,13 @@ def assert_artifacts_valid(output, evidence):
         for artifact in evidence["artifacts"]
     }
 
-    for command in evidence["commands"]:
-        assert len(command["artifact_ids"]) == 2
+    for index, command in enumerate(evidence["commands"]):
+        if command["artifact_ids"]:
+            assert len(command["artifact_ids"]) == 2
+        else:
+            assert evidence["collection"].get("error") is not None
+            assert index == len(evidence["commands"]) - 1
+
         assert set(command["artifact_ids"]).issubset(artifact_ids)
 
     for artifact in evidence["artifacts"]:
@@ -531,8 +536,12 @@ def test_collect_records_incomplete_status_on_output_save_exception(
 
     assert [
         command["name"] for command in evidence["commands"]
-    ] == ["version", "usb_scan"]
+    ] == ["version", "usb_scan", "device_info"]
 
+    failed_command = evidence["commands"][-1]
+    assert failed_command["execution_status"] == "COMPLETED"
+    assert failed_command["exit_code"] == 0
+    assert failed_command["artifact_ids"] == []
     assert len(evidence["artifacts"]) == 4
 
 
