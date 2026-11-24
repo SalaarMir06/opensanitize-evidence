@@ -1,5 +1,8 @@
 import json
 
+import pytest
+
+import ose.packager as packager
 from ose.crypto import generate_key_pair
 from ose.packager import create_package
 
@@ -181,3 +184,155 @@ def test_invalid_schema_2_collection_is_rejected_before_packaging(tmp_path):
         create_package(evidence_dir, output_dir, private_key)
 
     assert not output_dir.exists()
+
+
+
+def test_existing_empty_destination_is_rejected(tmp_path):
+    evidence_dir = tmp_path / "source"
+    output_dir = tmp_path / "package"
+    keys_dir = tmp_path / "keys"
+
+    evidence_dir.mkdir()
+    output_dir.mkdir()
+    keys_dir.mkdir()
+
+    (evidence_dir / "operation.log").write_text(
+        "Evidence\n",
+        encoding="utf-8",
+    )
+
+    private_key = keys_dir / "private.pem"
+    generate_key_pair(private_key, keys_dir / "public.pem")
+
+    with pytest.raises(FileExistsError):
+        create_package(evidence_dir, output_dir, private_key)
+
+    assert output_dir.is_dir()
+    assert list(output_dir.iterdir()) == []
+    assert list(tmp_path.glob(".package.staging-*")) == []
+
+
+def test_signing_failure_cleans_staging_directory(tmp_path, monkeypatch):
+    evidence_dir = tmp_path / "source"
+    output_dir = tmp_path / "package"
+    keys_dir = tmp_path / "keys"
+
+    evidence_dir.mkdir()
+    keys_dir.mkdir()
+
+    (evidence_dir / "operation.log").write_text(
+        "Evidence\n",
+        encoding="utf-8",
+    )
+
+    private_key = keys_dir / "private.pem"
+    generate_key_pair(private_key, keys_dir / "public.pem")
+
+    def fail_signing(*args, **kwargs):
+        raise RuntimeError("Simulated signing failure")
+
+    monkeypatch.setattr(packager, "sign_data", fail_signing)
+
+    with pytest.raises(RuntimeError, match="Simulated signing failure"):
+        create_package(evidence_dir, output_dir, private_key)
+
+    assert not output_dir.exists()
+    assert list(tmp_path.glob(".package.staging-*")) == []
+
+
+def test_destination_created_during_publication_is_not_overwritten(
+    tmp_path,
+    monkeypatch,
+):
+    evidence_dir = tmp_path / "source"
+    output_dir = tmp_path / "package"
+    keys_dir = tmp_path / "keys"
+
+    evidence_dir.mkdir()
+    keys_dir.mkdir()
+
+    (evidence_dir / "operation.log").write_text(
+        "Evidence\n",
+        encoding="utf-8",
+    )
+
+    private_key = keys_dir / "private.pem"
+    generate_key_pair(private_key, keys_dir / "public.pem")
+
+    original_publish = packager._rename_directory_noreplace
+
+    def create_destination_then_publish(staging, destination):
+        destination.mkdir()
+        sentinel = destination / "pre-existing.txt"
+        sentinel.write_text("Do not overwrite\n", encoding="utf-8")
+
+        original_publish(staging, destination)
+
+    monkeypatch.setattr(
+        packager,
+        "_rename_directory_noreplace",
+        create_destination_then_publish,
+    )
+
+    with pytest.raises(FileExistsError):
+        create_package(evidence_dir, output_dir, private_key)
+
+    assert output_dir.is_dir()
+    assert (
+        output_dir / "pre-existing.txt"
+    ).read_text(encoding="utf-8") == "Do not overwrite\n"
+    assert not (output_dir / "manifest.json").exists()
+    assert list(tmp_path.glob(".package.staging-*")) == []
+
+
+
+def test_copy_failure_cleans_staging_directory(tmp_path, monkeypatch):
+    evidence_dir = tmp_path / "source"
+    output_dir = tmp_path / "package"
+    keys_dir = tmp_path / "keys"
+
+    evidence_dir.mkdir()
+    keys_dir.mkdir()
+
+    (evidence_dir / "operation.log").write_text(
+        "Evidence\n",
+        encoding="utf-8",
+    )
+
+    private_key = keys_dir / "private.pem"
+    generate_key_pair(private_key, keys_dir / "public.pem")
+
+    def fail_copy(*args, **kwargs):
+        raise OSError("Simulated evidence copy failure")
+
+    monkeypatch.setattr(packager.shutil, "copy2", fail_copy)
+
+    with pytest.raises(OSError, match="Simulated evidence copy failure"):
+        create_package(evidence_dir, output_dir, private_key)
+
+    assert not output_dir.exists()
+    assert list(tmp_path.glob(".package.staging-*")) == []
+
+
+def test_symbolic_link_source_directory_is_rejected(tmp_path):
+    evidence_dir = tmp_path / "source"
+    source_link = tmp_path / "source-link"
+    output_dir = tmp_path / "package"
+    keys_dir = tmp_path / "keys"
+
+    evidence_dir.mkdir()
+    keys_dir.mkdir()
+    (evidence_dir / "operation.log").write_text(
+        "Evidence\n",
+        encoding="utf-8",
+    )
+    source_link.symlink_to(evidence_dir, target_is_directory=True)
+
+    private_key = keys_dir / "private.pem"
+    generate_key_pair(private_key, keys_dir / "public.pem")
+
+    with pytest.raises(ValueError, match="cannot be a symbolic link"):
+        create_package(source_link, output_dir, private_key)
+
+    assert not output_dir.exists()
+    assert list(tmp_path.glob(".package.staging-*")) == []
