@@ -604,8 +604,16 @@ def collect(device, expected_serial, output_path):
             "VERIFIED" if identity_successful else "FAILED"
         )
 
-    capture_complete = (
+    all_commands_completed = (
         len(commands) == len(command_definitions)
+        and all(
+            command["execution_status"] == "COMPLETED"
+            for command in commands
+        )
+    )
+
+    capture_complete = (
+        all_commands_completed
         and len(artifacts) == len(command_definitions) * 2
     )
 
@@ -619,7 +627,7 @@ def collect(device, expected_serial, output_path):
     collection_complete = (
         collection_error is None
         and post_check_error is None
-        and len(commands) == len(command_definitions)
+        and all_commands_completed
     )
 
     commands_successful = all(

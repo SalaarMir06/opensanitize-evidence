@@ -286,8 +286,9 @@ def test_collect_preserves_timeout_and_partial_output(
     )
 
     assert result == 1
-    assert evidence["collection"]["status"] == "COMPLETE"
-    assert evidence["capture"]["status"] == "COMPLETE"
+    assert evidence["collection"]["status"] == "INCOMPLETE"
+    assert evidence["capture"]["status"] == "PARTIAL"
+    assert evidence["identity"]["status"] == "VERIFIED"
     assert command["timed_out"] is True
     assert command["exit_code"] is None
     assert command["execution_status"] == "TIMED_OUT"
