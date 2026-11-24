@@ -51,12 +51,15 @@ The current prototype includes:
 |---|---|
 | Cryptographic module | SHA-256 hashing and Ed25519 signatures |
 | Evidence packager | Creates signed evidence packages |
-| Evidence verifier | Checks signatures, hashes, file sizes, and package contents |
-| CLI | Provides key generation, packaging, and verification commands |
+| Evidence verifier | Checks signatures, hashes, file sizes, package contents, and embedded Schema 2.0 collections |
+| PDF report generator | Produces audit reports containing integrity results, evidence inventories, and sanitization assessment findings |
+| CLI | Provides key generation, packaging, verification, and PDF reporting commands |
 | openSeaChest collector | Performs read-only device discovery and evidence collection |
+| smartctl collector | Captures device identity and diagnostic evidence using smartctl |
+| hdparm collector | Captures ATA device identification and diagnostic evidence using hdparm |
 | Automated tests | Tests cryptography, packaging, verification, and collector behavior |
 
-The openSeaChest collector currently records:
+The current openSeaChest, smartctl, and hdparm collectors use the standardized Evidence Schema 2.0 and record:
 
 - Initial and final device inventory.
 - Device identity information.
@@ -142,7 +145,45 @@ ose verify \
     --public-key keys/ose-signing-public.pem
 ```
 
-A successful verification indicates that the package contents match the signed manifest and that its signature validates against the supplied public key. It does not establish that sanitization succeeded.
+Generate a PDF audit report:
+
+```bash
+ose report \
+    --input evidence/packages/example \
+    --public-key keys/ose-signing-public.pem \
+    --output reports/example-audit.pdf
+```
+
+An optional JSON file can provide separately documented sanitization operation evidence:
+
+```bash
+ose report \
+    --input evidence/packages/example \
+    --public-key keys/ose-signing-public.pem \
+    --output reports/example-audit.pdf \
+    --operation operation.json
+```
+
+The operation JSON must contain an object using the assessment engine's input fields. For example:
+
+```json
+{
+  "status": "COMPLETED",
+  "technique": "PURGE",
+  "verification": {"status": "PASSED"},
+  "validation": {"status": "PASSED"}
+}
+```
+
+This operation evidence is supplied separately; it is not added to the signed evidence package. A generic package without a Schema 2.0 collection remains `NOT_ASSESSED`. A Schema 2.0 collection with sufficient operation evidence may reach `UNDER_REVIEW`, but the current assessment engine does not issue `CONFORMANT` conclusions.
+
+Report command exit codes:
+
+- `0`: PDF generated and package integrity verification passed.
+- `1`: PDF generated, but package integrity verification failed. The report does not assess untrusted embedded evidence.
+- `2`: Report generation or input processing failed.
+
+A successful verification indicates that the package contents match the signed manifest and that its signature validates against the supplied public key. It does not establish that sanitization succeeded. A valid signature establishes integrity relative to the signing key, not physical erasure.
 
 ## Testing
 
@@ -157,9 +198,11 @@ The current test suite covers:
 - SHA-256 hashing.
 - Ed25519 key generation and signature validation.
 - Evidence package creation.
-- Evidence integrity verification.
-- Detection of modified, missing, and unexpected files.
-- openSeaChest collector behavior.
+- Evidence integrity verification and tamper detection.
+- Evidence Schema 2.0 validation and collection artifact integrity.
+- Deterministic sanitization assessment behavior.
+- PDF report generation and CLI behavior.
+- openSeaChest, smartctl, and hdparm collector behavior.
 - Collector failure and incomplete-evidence handling.
 
 ## Evidence and key management
@@ -192,15 +235,16 @@ Planned development areas:
 
 - [ ] Complete project documentation.
 - [ ] Expand device discovery and identity normalization.
-- [ ] Implement a dedicated smartctl collector.
-- [ ] Implement hdparm evidence collection.
+- [x] Implement a dedicated smartctl collector.
+- [x] Implement hdparm evidence collection.
 - [ ] Implement NVMe evidence collection.
 - [ ] Implement SCSI evidence collection.
-- [ ] Standardize evidence schemas across collectors.
+- [x] Standardize evidence schemas across collectors (Evidence Schema 2.0).
 - [ ] Improve atomic package creation and filesystem safety.
 - [ ] Add trusted timestamp support.
 - [ ] Add key-management improvements.
-- [ ] Implement audit report and certificate generation.
+- [x] Implement PDF audit report generation.
+- [ ] Develop formal certificate issuance and approval workflows.
 - [ ] Develop an independent audit review interface.
 - [ ] Add a web-based management dashboard.
 

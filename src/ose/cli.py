@@ -5,10 +5,11 @@ from pathlib import Path
 
 from ose.crypto import generate_key_pair
 from ose.packager import create_package
+from ose.report import generate_report
 from ose.verifier import verify_package
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ose",
         description="OpenSanitize Evidence - evidence integrity toolkit",
@@ -42,7 +43,20 @@ def main():
     verify.add_argument("--input", required=True, help="Evidence package directory")
     verify.add_argument("--public-key", required=True, help="Public verification key")
 
-    args = parser.parse_args()
+    # PDF audit report command
+    report = commands.add_parser(
+        "report",
+        help="Generate a PDF audit report from an evidence package",
+    )
+    report.add_argument("--input", required=True, help="Evidence package directory")
+    report.add_argument("--public-key", required=True, help="Public verification key")
+    report.add_argument("--output", required=True, help="PDF report output path")
+    report.add_argument(
+        "--operation",
+        help="Optional JSON file containing separately supplied operation evidence",
+    )
+
+    args = parser.parse_args(argv)
 
     try:
         if args.command == "keygen":
@@ -92,6 +106,37 @@ def main():
             print(json.dumps(result, indent=2))
 
             if result["valid"]:
+                print("INTEGRITY CHECK: PASSED")
+                return 0
+
+            print("INTEGRITY CHECK: FAILED")
+            return 1
+
+        elif args.command == "report":
+            operation = None
+
+            if args.operation:
+                operation_path = Path(args.operation)
+                operation = json.loads(
+                    operation_path.read_text(encoding="utf-8")
+                )
+
+                if not isinstance(operation, dict):
+                    raise ValueError(
+                        "Operation evidence JSON must contain an object."
+                    )
+
+            result = generate_report(
+                package_dir=args.input,
+                public_key_path=args.public_key,
+                output_path=args.output,
+                operation=operation,
+            )
+
+            print(json.dumps(result, indent=2))
+            print(f"PDF REPORT: {result['output_path']}")
+
+            if result["integrity_valid"]:
                 print("INTEGRITY CHECK: PASSED")
                 return 0
 
