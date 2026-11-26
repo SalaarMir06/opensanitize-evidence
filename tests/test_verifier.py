@@ -1,4 +1,7 @@
 import json
+
+import pytest
+
 from ose.crypto import generate_key_pair
 from ose.packager import create_package
 from ose.verifier import verify_package
@@ -423,5 +426,32 @@ def test_duplicate_manifest_json_key_is_rejected(tmp_path):
     assert result["valid"] is False
     assert any(
         "Duplicate JSON object key" in error
+        for error in result["errors"]
+    )
+
+
+@pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+def test_nonstandard_json_constants_are_rejected(tmp_path, constant):
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+
+    original = (package / "manifest.json").read_bytes()
+    marker = b'"metadata":{}'
+
+    if original.count(marker) != 1:
+        raise AssertionError("Expected exactly one empty metadata object.")
+
+    malformed = original.replace(
+        marker,
+        b'"metadata":{"invalid":' + constant.encode("ascii") + b'}',
+        1,
+    )
+
+    _resign_manifest_for_test(package, private_key, malformed)
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any(
+        "Non-standard JSON constant" in error
         for error in result["errors"]
     )

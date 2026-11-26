@@ -11,6 +11,11 @@ from ose.crypto import verify_signature
 from ose.collection_validation import validate_collection_directory
 
 
+def _reject_nonstandard_json_constant(value):
+    """Reject NaN and Infinity, which are not valid JSON constants."""
+    raise ValueError(f"Non-standard JSON constant: {value}")
+
+
 def _reject_duplicate_json_keys(pairs):
     """Reject duplicate keys in every JSON object."""
     result = {}
@@ -169,6 +174,7 @@ def verify_package(
         manifest = json.loads(
             manifest_bytes,
             object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonstandard_json_constant,
         )
 
     except (OSError, UnicodeError, ValueError, TypeError) as exc:

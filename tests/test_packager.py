@@ -336,3 +336,12 @@ def test_symbolic_link_source_directory_is_rejected(tmp_path):
 
     assert not output_dir.exists()
     assert list(tmp_path.glob(".package.staging-*")) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_canonical_json_rejects_nonstandard_float_constants(value):
+    with pytest.raises(ValueError):
+        packager.canonical_json({"value": value})
