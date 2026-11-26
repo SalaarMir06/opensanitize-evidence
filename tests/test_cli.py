@@ -163,3 +163,97 @@ def test_cli_report_does_not_overwrite_existing_output(
     assert exit_code == 2
     assert output.read_bytes() == original
     assert "Error:" in captured.err
+
+
+def test_cli_keygen_creates_key_pair(tmp_path, capsys):
+    private_key = tmp_path / "keys" / "private.pem"
+    public_key = tmp_path / "keys" / "public.pem"
+
+    exit_code = main([
+        "keygen",
+        "--private", str(private_key),
+        "--public", str(public_key),
+    ])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert private_key.is_file()
+    assert public_key.is_file()
+    assert private_key.stat().st_mode & 0o777 == 0o600
+    assert "Ed25519 key pair generated." in captured.out
+    assert private_key.read_bytes().startswith(
+        b"-----BEGIN PRIVATE KEY-----"
+    )
+    assert public_key.read_bytes().startswith(
+        b"-----BEGIN PUBLIC KEY-----"
+    )
+
+
+def test_cli_package_creates_evidence_package(tmp_path, capsys):
+    source = tmp_path / "source"
+    package = tmp_path / "package"
+    keys = tmp_path / "keys"
+
+    source.mkdir()
+    keys.mkdir()
+
+    (source / "operation.log").write_text(
+        "CLI package test evidence\n",
+        encoding="utf-8",
+    )
+
+    private_key = keys / "private.pem"
+    public_key = keys / "public.pem"
+    generate_key_pair(private_key, public_key)
+
+    exit_code = main([
+        "package",
+        "--input", str(source),
+        "--output", str(package),
+        "--key", str(private_key),
+    ])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert (package / "manifest.json").is_file()
+    assert (package / "manifest.sig").is_file()
+    assert (package / "evidence" / "operation.log").is_file()
+    assert "Evidence package created." in captured.out
+
+
+def test_cli_verify_accepts_valid_package(tmp_path, capsys):
+    package, public_key = make_package(tmp_path)
+
+    exit_code = main([
+        "verify",
+        "--input", str(package),
+        "--public-key", str(public_key),
+    ])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "INTEGRITY CHECK: PASSED" in captured.out
+
+
+def test_cli_verify_rejects_tampered_package(tmp_path, capsys):
+    package, public_key = make_package(tmp_path)
+
+    evidence = package / "evidence" / "operation.log"
+    evidence.write_text(
+        "Tampered CLI evidence\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main([
+        "verify",
+        "--input", str(package),
+        "--public-key", str(public_key),
+    ])
+
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert "INTEGRITY CHECK: FAILED" in captured.out
