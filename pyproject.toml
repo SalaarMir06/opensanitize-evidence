@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "opensanitize-evidence"
 version = "0.1.0"
 description = "Open-source disk sanitization evidence integrity and verification toolkit"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "cryptography>=45.0",
