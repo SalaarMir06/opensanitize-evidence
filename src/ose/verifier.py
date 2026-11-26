@@ -3,10 +3,24 @@ import json
 import os
 import re
 import stat
+import uuid
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 from ose.crypto import verify_signature
 from ose.collection_validation import validate_collection_directory
+
+
+def _reject_duplicate_json_keys(pairs):
+    """Reject duplicate keys in every JSON object."""
+    result = {}
+
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON object key: {key}")
+        result[key] = value
+
+    return result
 
 
 def _read_regular_file(path: Path) -> bytes:
@@ -152,7 +166,10 @@ def verify_package(
                 "errors": ["Manifest signature is invalid."],
             }
 
-        manifest = json.loads(manifest_bytes)
+        manifest = json.loads(
+            manifest_bytes,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
 
     except (OSError, UnicodeError, ValueError, TypeError) as exc:
         return {
@@ -167,6 +184,64 @@ def verify_package(
             "checked_files": 0,
             "errors": ["Manifest must contain a JSON object."],
         }
+
+    required_fields = {
+        "schema_version",
+        "package_id",
+        "created_at",
+        "hash_algorithm",
+        "signature_algorithm",
+        "evidence_files",
+        "metadata",
+    }
+
+    missing_fields = required_fields - manifest.keys()
+
+    for field in sorted(missing_fields):
+        errors.append(f"Manifest is missing required field: {field}")
+
+    if "package_id" in manifest:
+        package_id = manifest["package_id"]
+
+        if not isinstance(package_id, str):
+            errors.append("Manifest package_id must be a string.")
+        else:
+            try:
+                parsed_uuid = uuid.UUID(package_id)
+
+                if str(parsed_uuid) != package_id:
+                    errors.append("Manifest package_id must be a canonical UUID.")
+            except (ValueError, AttributeError):
+                errors.append("Manifest package_id must be a valid UUID.")
+
+    if "created_at" in manifest:
+        created_at = manifest["created_at"]
+
+        if not isinstance(created_at, str):
+            errors.append("Manifest created_at must be a string.")
+        else:
+            try:
+                timestamp_value = (
+                    created_at[:-1] + "+00:00"
+                    if created_at.endswith("Z")
+                    else created_at
+                )
+                parsed_timestamp = datetime.fromisoformat(timestamp_value)
+
+                if (
+                    parsed_timestamp.tzinfo is None
+                    or parsed_timestamp.utcoffset() is None
+                ):
+                    errors.append(
+                        "Manifest created_at must include a timezone."
+                    )
+            except ValueError:
+                errors.append(
+                    "Manifest created_at must be a valid ISO 8601 timestamp."
+                )
+
+    if not isinstance(manifest.get("metadata"), dict):
+        errors.append("Manifest metadata must be a JSON object.")
 
     if manifest.get("schema_version") != "1.0":
         errors.append("Unsupported manifest schema version.")

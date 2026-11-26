@@ -271,3 +271,157 @@ def test_symbolic_link_public_key_is_rejected(tmp_path):
     result = verify_package(package, public_key)
 
     assert result["valid"] is False
+
+def _resign_manifest_for_test(package, private_key, manifest_bytes):
+    from ose.crypto import sign_data
+
+    (package / "manifest.json").write_bytes(manifest_bytes)
+    signature = sign_data(manifest_bytes, private_key)
+    (package / "manifest.sig").write_text(
+        signature + "\n",
+        encoding="ascii",
+    )
+
+
+def _make_package_with_keys(tmp_path):
+    package, public_key = make_package(tmp_path)
+    private_key = tmp_path / "keys" / "private.pem"
+    return package, private_key, public_key
+
+
+def test_invalid_package_uuid_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    manifest["package_id"] = "not-a-uuid"
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any("package_id" in error for error in result["errors"])
+
+
+def test_noncanonical_package_uuid_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    manifest["package_id"] = manifest["package_id"].upper()
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any("canonical UUID" in error for error in result["errors"])
+
+
+def test_package_timestamp_without_timezone_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    manifest["created_at"] = "2026-11-25T10:00:00"
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any("timezone" in error for error in result["errors"])
+
+
+def test_invalid_package_timestamp_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    manifest["created_at"] = "not-a-timestamp"
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any("ISO 8601" in error for error in result["errors"])
+
+
+def test_non_object_package_metadata_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    manifest["metadata"] = ["invalid", "metadata"]
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any("metadata" in error for error in result["errors"])
+
+
+def test_missing_required_manifest_field_is_rejected(tmp_path):
+    from ose.packager import canonical_json
+
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+    manifest = json.loads((package / "manifest.json").read_bytes())
+    del manifest["package_id"]
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        canonical_json(manifest),
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any(
+        "missing required field: package_id" in error
+        for error in result["errors"]
+    )
+
+
+def test_duplicate_manifest_json_key_is_rejected(tmp_path):
+    package, private_key, public_key = _make_package_with_keys(tmp_path)
+
+    original = (package / "manifest.json").read_bytes()
+    duplicate_key_manifest = original[:-1] + b',"metadata":{}}'
+
+    _resign_manifest_for_test(
+        package,
+        private_key,
+        duplicate_key_manifest,
+    )
+
+    result = verify_package(package, public_key)
+
+    assert result["valid"] is False
+    assert any(
+        "Duplicate JSON object key" in error
+        for error in result["errors"]
+    )
