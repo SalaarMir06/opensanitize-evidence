@@ -113,7 +113,7 @@ The intended evidence workflow is:
 Clone the repository:
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/SalaarMir06/opensanitize-evidence.git
 cd opensanitize-evidence
 ```
 
@@ -276,6 +276,13 @@ Planned development areas:
 - [ ] Develop an independent audit review interface.
 - [ ] Add a web-based management dashboard.
 - [ ] Complete release documentation and independent security review.
+
+## Contributing and support
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a pull request.
+
+- **Bug reports and feature requests:** [Open an issue](https://github.com/SalaarMir06/opensanitize-evidence/issues).
+- **Security vulnerabilities:** Follow the private reporting instructions in [SECURITY.md](SECURITY.md). Do not disclose vulnerabilities in public issues.
 
 ## Project status
 
